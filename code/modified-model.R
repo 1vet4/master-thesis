@@ -32,7 +32,7 @@ optimize_funding <- function(df,
                              a1 = 0.5,
                              lambda = 0.1,
                              bootstrap = FALSE,
-                             n_boot = 20,
+                             n_boot = 100,
                              bootstrap_type = c("block", "jackknife_uni")
 ) {
   F <- as.matrix(df %>% select(all_of(perf_cols)))
@@ -51,7 +51,7 @@ optimize_funding <- function(df,
     # Weights
     w <- Variable(n_metrics, nonneg = TRUE)
     
-    y_pred <- a0 * df$EnrollmentPart + a1 * (F %*% w) * (a0*df$EnrollmentPart / df$mean_E)
+    y_pred <- a0 * df$EnrollmentPart + a1 * (F %*% w) * (df$EnrollmentPart / df$mean_E)
     years <- unique(df$Year)
     
     # Constraints
@@ -77,7 +77,7 @@ optimize_funding <- function(df,
     w_norm <- w_opt / sum(w_opt)
     
     # Predicted funding
-    df$Predicted_Funding <- a0 * df$EnrollmentPart + a1 * (F %*% w_opt) * (a0*df$EnrollmentPart / df$mean_E)
+    df$Predicted_Funding <- a0 * df$EnrollmentPart + a1 * (F %*% w_opt) * (df$EnrollmentPart / df$mean_E)
     
     return(list(
       w_opt = w_opt,
@@ -123,7 +123,7 @@ optimize_funding <- function(df,
         w_sample <- Variable(n_metrics, nonneg = TRUE)
       
         F_sample <- as.matrix(df_sample %>% select(all_of(metric_names)))
-        y_pred_sample <- a0 * df_sample$EnrollmentPart + a1 * (F_sample %*% w_sample) * (a0*df_sample$EnrollmentPart / df_sample$mean_E)
+        y_pred_sample <- a0 * df_sample$EnrollmentPart + a1 * (F_sample %*% w_sample) * (df_sample$EnrollmentPart / df_sample$mean_E)
         
         year_counts <- table(df_sample$Year)  
         # Constraints
@@ -132,8 +132,8 @@ optimize_funding <- function(df,
           sum(y_pred_sample[idx]) <= sum(df_sample$Funding[df_sample$Year == yr])
         })
         constraints <- c(
-          year_constraints,
-          list(w >= 0)
+          year_constraints_sample,
+          list(w_sample >= 0)
         )
         
         objective_sample <- Minimize(
@@ -178,7 +178,7 @@ optimize_funding <- function(df,
         df_full <- df %>% left_join(mean_E_by_year, by = "Year")
         w_full_var <- Variable(n_metrics, nonneg = TRUE)
         F_full <- as.matrix(df_full %>% select(all_of(metric_names)))
-        y_pred_full <- a0 * df_full$EnrollmentPart + a1 * (F_full %*% w_full_var) * (a0*df_full$EnrollmentPart / df_full$mean_E)
+        y_pred_full <- a0 * df_full$EnrollmentPart + a1 * (F_full %*% w_full_var) * (df_full$EnrollmentPart / df_full$mean_E)
         year_constraints_full <- lapply(unique(df_full$Year), function(yr) {
           idx <- which(df_full$Year == yr)
           sum(y_pred_full[idx]) <= sum(df_full$Funding[idx])
@@ -196,14 +196,14 @@ optimize_funding <- function(df,
           
           w_var <- Variable(n_metrics, nonneg = TRUE)
           F_jack <- as.matrix(df_jack %>% select(all_of(metric_names)))
-          y_pred <- a0 * df_jack$EnrollmentPart + a1 * (F_jack %*% w_var) * (a0*df_jack$EnrollmentPart / df_jack$mean_E)
+          y_pred <- a0 * df_jack$EnrollmentPart + a1 * (F_jack %*% w_var) * (df_jack$EnrollmentPart / df_jack$mean_E)
           year_constraints <- lapply(unique(df_jack$Year), function(yr) {
             idx <- which(df_jack$Year == yr)
             sum(y_pred[idx]) <= sum(df_jack$Funding[idx])
           })
           constraints <- c(
             year_constraints,
-            list(w >= 0)
+            list(w_var >= 0)
           )
           problem <- Problem(Minimize(sum_squares(y_pred - df_jack$Funding) + lambda * sum_squares(w_var)),
                              constraints = constraints)
@@ -227,7 +227,7 @@ optimize_funding <- function(df,
       summarise(mean_E = mean(EnrollmentPart), .groups = "drop")
     df <- df %>% left_join(mean_E_by_year, by = "Year")
     
-    df$Predicted_Funding <- a0 * df$EnrollmentPart + a1 * (F %*% w_mean) * (a0*df$EnrollmentPart / df$mean_E)
+    df$Predicted_Funding <- a0 * df$EnrollmentPart + a1 * (F %*% w_mean) * (df$EnrollmentPart / df$mean_E)
     return(list(
       w_boot = w_boot,
       w_mean = w_mean,
@@ -409,7 +409,7 @@ cv_lambda <- function(df, metric_names, lambda_values, a0, a1) {
       test_df <- test_df %>% left_join(mean_E_by_year, by = "Year")
       
       test_pred <- test_df %>%
-        mutate(Predicted = a0 * EnrollmentPart + a1 * rowSums(as.matrix(select(., all_of(metric_names))) * w) * (a0*EnrollmentPart / mean_E))
+        mutate(Predicted = a0 * EnrollmentPart + a1 * rowSums(as.matrix(select(., all_of(metric_names))) * w) * (EnrollmentPart / mean_E))
 
       fold_mae <- mean(abs(test_pred$Funding - test_pred$Predicted))
       fold_errors <- c(fold_errors, fold_mae)

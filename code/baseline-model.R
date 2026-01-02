@@ -76,99 +76,149 @@ optimize_funding <- function(df,
     ))
     # Resampling
   } else if(bootstrap) {
+    
     metric_names <- perf_cols
     w_boot <- matrix(NA, nrow = n_boot, ncol = n_metrics)
     colnames(w_boot) <- metric_names
     fail_count <- 0
     
-    for (i in 1:n_boot) {
-      if (bootstrap_type == "row") {
-        df_sample <- df %>%
-          group_by(Year) %>%
-          sample_frac(size = 1, replace = TRUE) %>%
-          ungroup()
-        w_sample <- Variable(n_metrics, nonneg = TRUE)
+    if (bootstrap_type == "block") {
+      for (i in 1:n_boot) {
+        years <- sort(unique(df$Year))
+        n_years <- length(years)
+        # Preparing blocks
+        b <- 2  # block length
+        n_blocks <- ceiling(n_years / b)
+        n_full_blocks <- floor(n_years / b)
         
-        F_sample <- as.matrix(df_sample %>% select(all_of(metric_names)))
-        y_pred_sample <- a0 * df_sample$EnrollmentPart + a1 * (F_sample %*% w_sample)
+        blocks <- split(years[1:(n_full_blocks * b)], rep(1:n_full_blocks, each = b))
         
-        year_constraints_sample <- lapply(unique(df_sample$Year), function(yr) {
-          idx <- which(df_sample$Year == yr)
-          sum(y_pred_sample[idx]) <= sum(df_sample$Funding[idx])
-        })
+        if (n_years %% b != 0) {
+          blocks[[n_full_blocks]] <- c(blocks[[n_full_blocks]], years[(n_full_blocks * b + 1):n_years])
+        }
         
-      } else if (bootstrap_type == "block") {
-        sampled_years <- sample(unique(df$Year), length(unique(df$Year)), replace = TRUE)
+        sampled_blocks <- sample(seq_along(blocks), length(blocks), replace = TRUE)
+        sampled_years <- unlist(blocks[sampled_blocks])
+        
         df_sample <- do.call(rbind, lapply(sampled_years, function(yr) df[df$Year == yr, ]))
+        
         w_sample <- Variable(n_metrics, nonneg = TRUE)
         
         F_sample <- as.matrix(df_sample %>% select(all_of(metric_names)))
         y_pred_sample <- a0 * df_sample$EnrollmentPart + a1 * (F_sample %*% w_sample)
         
         year_counts <- table(df_sample$Year)  
+        # Constraints
         year_constraints_sample <- lapply(unique(df_sample$Year), function(yr) {
           idx <- which(df_sample$Year == yr)
-          sum(y_pred_sample[idx]) <= sum(df$Funding[df$Year == yr]) * year_counts[as.character(yr)]
+          sum(y_pred_sample[idx]) <= sum(df_sample$Funding[df_sample$Year == yr])
         })
+        constraints <- c(
+          year_constraints_sample,
+          list(w_sample >= 0)
+        )
         
-      }
-      }
-      else if (bootstrap_type == "jackknife_uni") {
+        objective_sample <- Minimize(
+          sum_squares(y_pred_sample - df_sample$Funding) +
+            lambda * sum_squares(w_sample)
+        )
+        problem_sample <- Problem(objective_sample, constraints = constraints)
         
-        uni_to_remove <- sample(unique(df$University_Code), 1)
-        df_sample <- df[df$University_Code != uni_to_remove, ]
+        result_sample <- tryCatch(
+          solve(problem_sample),
+          error = function(e) { fail_count <<- fail_count + 1; NULL },
+          warning = function(w) { fail_count <<- fail_count + 1; NULL }
+        )
         
-        w_sample <- Variable(n_metrics, nonneg = TRUE)
-        
-        F_sample <- as.matrix(df_sample %>% select(all_of(metric_names)))
-        
-        y_pred_sample <- a0 * df_sample$EnrollmentPart + a1 * (F_sample %*% w_sample)
-        
-        year_constraints_sample <- lapply(unique(df_sample$Year), function(yr) {
-          idx <- which(df_sample$Year == yr)
-          sum(y_pred_sample[idx]) <= sum(df_sample$Funding[idx])
+        # Results
+        if (!is.null(result_sample)) {
+          w_boot[i, ] <- as.vector(result_sample$getValue(w_sample))
+          
+        }
+      } 
+      w_mean <- colMeans(w_boot, na.rm = TRUE)
+      w_mean_norm <- w_mean / sum(w_mean)
+      
+      w_boot_norm <- t(apply(w_boot, 1, function(x) x / sum(x, na.rm = TRUE)))
+      
+      w_sd   <- apply(w_boot, 2, sd, na.rm = TRUE)
+      w_sd_norm <- apply(w_boot_norm, 2, sd, na.rm = TRUE)
+      
+      w_ci <- apply(w_boot_norm, 2, function(x) {
+        quantile(x, probs = c(0.025, 0.975), na.rm = TRUE)
+      })
+    }
+    else if (bootstrap_type == "jackknife_uni") {
+      unis <- unique(df$University_Code)
+      n_unis <- length(unis)
+      w_jack <- matrix(NA, nrow = n_unis, ncol = n_metrics)
+      colnames(w_jack) <- metric_names
+      
+      
+      # Full dataset optimization for jacckinfe bias calculation later
+      df_full <- df
+      w_full_var <- Variable(n_metrics, nonneg = TRUE)
+      F_full <- as.matrix(df_full %>% select(all_of(metric_names)))
+      y_pred_full <- a0 * df_full$EnrollmentPart + a1 * (F_full %*% w_full_var)
+      year_constraints_full <- lapply(unique(df_full$Year), function(yr) {
+        idx <- which(df_full$Year == yr)
+        sum(y_pred_full[idx]) <= sum(df_full$Funding[idx])
+      })
+      problem_full <- Problem(Minimize(sum_squares(y_pred_full - df_full$Funding) + lambda * sum_squares(w_full_var)),
+                              constraints = c(year_constraints_full, list(w_full_var >= 0)))
+      result_full <- solve(problem_full)
+      w_full <- as.vector(result_full$getValue(w_full_var))
+      w_full_norm <- w_full / sum(w_full)
+      
+      for (i in seq_along(unis)) {
+        df_jack <- df[df$University_Code != unis[i], ]
+
+        w_var <- Variable(n_metrics, nonneg = TRUE)
+        F_jack <- as.matrix(df_jack %>% select(all_of(metric_names)))
+        y_pred <- a0 * df_jack$EnrollmentPart + a1 * (F_jack %*% w_var)
+        year_constraints <- lapply(unique(df_jack$Year), function(yr) {
+          idx <- which(df_jack$Year == yr)
+          sum(y_pred[idx]) <= sum(df_jack$Funding[idx])
         })
+        constraints <- c(
+          year_constraints,
+          list(w_var >= 0)
+        )
+        problem <- Problem(Minimize(sum_squares(y_pred - df_jack$Funding) + lambda * sum_squares(w_var)),
+                           constraints = constraints)
+        result <- solve(problem)
+        w_jack[i, ] <- as.vector(result$getValue(w_var))
       }
-      
-      weight_constraints_sample <- list(w_sample >= 0)
-      
-      objective_sample <- Minimize(
-        sum_squares(y_pred_sample - df_sample$Funding) +
-          lambda * sum_squares(w_sample)
-      )
-      problem_sample <- Problem(objective_sample, constraints = c(year_constraints_sample, weight_constraints_sample))
-      
-      result_sample <- tryCatch(
-        solve(problem_sample),
-        error = function(e) { fail_count <<- fail_count + 1; NULL },
-        warning = function(w) { fail_count <<- fail_count + 1; NULL }
-      )
-      
-      if (!is.null(result_sample)) {
-        w_boot[i, ] <- as.vector(result_sample$getValue(w_sample))
-        
-      }
+      # Results
+      w_jack_norm <- t(apply(w_jack, 1, function(x) x / sum(x, na.rm = TRUE)))
+      w_mean <- colMeans(w_jack)
+      w_sd <- sqrt((n_unis - 1) / n_unis * colSums((w_jack - w_mean)^2))
+      w_mean_norm <- w_mean / sum(w_mean)
+      w_bias <- (n_unis - 1) * (w_mean_norm - w_full_norm)
+      w_sd_norm <- apply(w_jack_norm, 2, sd, na.rm = TRUE)
+      w_ci <- apply(w_jack_norm, 2, function(x) quantile(x, probs=c(0.025, 0.975), na.rm=TRUE))
       
     }
     cat("Bootstraping simulations failed:", fail_count, "\n")
     
-    # Results
-    w_mean <- colMeans(w_boot, na.rm = TRUE)
-    w_mean_norm <- w_mean / sum(w_mean)
-    w_sd   <- apply(w_boot, 2, sd, na.rm = TRUE)
-    w_boot_norm <- t(apply(w_boot, 1, function(x) x / sum(x, na.rm = TRUE)))
-    w_ci <- apply(w_boot_norm, 2, function(x) {
-      quantile(x, probs = c(0.025, 0.975), na.rm = TRUE)
-    })
+    mean_E_by_year <- df %>%
+      group_by(Year) %>%
+      summarise(mean_E = mean(EnrollmentPart), .groups = "drop")
+    df <- df %>% left_join(mean_E_by_year, by = "Year")
+    
     df$Predicted_Funding <- a0 * df$EnrollmentPart + a1 * (F %*% w_mean)
     return(list(
       w_boot = w_boot,
       w_mean = w_mean,
       w_mean_norm = w_mean_norm,
       w_sd = w_sd,
+      w_sd_norm = w_sd_norm,
+      w_bias = if(bootstrap_type=="jackknife_uni") w_bias else NULL,
       w_ci = t(w_ci),
       result_df = df
     ))
+    
+  }
   }
 
 
@@ -589,25 +639,6 @@ sum(a0_85_a1_15_result_boot$w_mean_norm)
 a0_85_a1_15_analysis_block <- analyze_funding_results(a0_85_a1_15_result_block$result_df,
                                                      plot=TRUE)
 
-# JACK YEAR
-
-a0_85_a1_15_result_jack_year <- optimize_funding(
-  df,
-  perf_cols = metric_names,
-  a0 = 0.85,
-  a1 = 0.15,
-  lambda = lambda_85_15,
-  bootstrap=TRUE,
-  n_boot=100,
-  bootstrap_type="jackknife_year"
-)
-
-a0_85_a1_15_result_jack_year$w_mean_norm
-
-a0_85_a1_15_result_jack_year$w_ci
-
-a0_85_a1_15_result_jack_year$w_sd
-
 # JACK UNI
 
 a0_85_a1_15_result_jack_uni <- optimize_funding(
@@ -617,7 +648,6 @@ a0_85_a1_15_result_jack_uni <- optimize_funding(
   a1 = 0.15,
   lambda = lambda_85_15,
   bootstrap=TRUE,
-  n_boot=100,
   bootstrap_type="jackknife_uni"
 )
 
@@ -651,24 +681,6 @@ a0_75_a1_25_result_block$w_sd
 a0_75_a1_25_analysis_boot <- analyze_funding_results(a0_75_a1_25_result_boot$result_df)
 
 
-# JACK YEAR
-
-
-a0_75_a1_25_result_jack_year <- optimize_funding(
-  df,
-  perf_cols = metric_names,
-  a0 = 0.75,
-  a1 = 0.25,
-  lambda = lambda_75_25,
-  bootstrap=TRUE,
-  n_boot=100,
-  bootstrap_type="jackknife_year"
-)
-
-a0_75_a1_25_result_jack_year$w_mean
-a0_75_a1_25_result_jack_year$w_ci
-a0_75_a1_25_result_jack_year$w_sd
-
 # JACK UNI
 
 
@@ -679,7 +691,6 @@ a0_75_a1_25_result_jack_uni <- optimize_funding(
   a1 = 0.25,
   lambda = lambda_75_25,
   bootstrap=TRUE,
-  n_boot=100,
   bootstrap_type="jackknife_uni"
 )
 
@@ -708,24 +719,6 @@ a0_5_a1_5_result_block$w_ci
 
 a0_5_a1_5_analysis <- analyze_funding_results(a0_5_a1_5_result$result_df)
 
-# JACK YEAR
-
-
-a0_5_a1_5_result_jack_year <- optimize_funding(
-  df,
-  perf_cols = metric_names,
-  a0 = 0.5,
-  a1 = 0.5,
-  lambda = lambda_5_5,
-  bootstrap=TRUE,
-  n_boot=100,
-  bootstrap_type="jackknife_year"
-)
-
-a0_5_a1_5_result_jack_year$w_mean_norm
-
-a0_5_a1_5_result_jack_year$w_ci
-
 
 # JACK UNI
 
@@ -737,7 +730,6 @@ a0_5_a1_5_result_jack_uni <- optimize_funding(
   a1 = 0.5,
   lambda = lambda_5_5,
   bootstrap=TRUE,
-  n_boot=100,
   bootstrap_type="jackknife_uni"
 )
 
