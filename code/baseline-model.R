@@ -353,7 +353,7 @@ analyze_funding_results <- function(df, plot, save_excel,
 cv_lambda <- function(df, metric_names, lambda_values, a0, a1) {
   
   years <- sort(unique(df$Year))
-  cv_results <- data.frame(lambda = lambda_values, MAE = NA)
+  cv_results <- data.frame(lambda = lambda_values, MSE = NA)
   all_weights <- list()
   for (i in seq_along(lambda_values)) {
     lam <- lambda_values[i]
@@ -385,30 +385,30 @@ cv_lambda <- function(df, metric_names, lambda_values, a0, a1) {
       fold_weights <- cbind(fold_weights, w_norm)
       test_pred <- test_df %>%
         mutate(Predicted = a0 * EnrollmentPart + a1 * rowSums(as.matrix(select(., all_of(metric_names))) * w))
-      fold_mae <- mean(abs(test_pred$Funding - test_pred$Predicted))
-      fold_errors <- c(fold_errors, fold_mae)
+      fold_mse <- mean((test_pred$Funding - test_pred$Predicted)^2)
+      fold_errors <- c(fold_errors, fold_mse)
     }
     
-    cv_results$MAE[i] <- mean(fold_errors)
+    cv_results$MSE[i] <- mean(fold_errors)
     all_weights[[i]] <- rowMeans(fold_weights)
   }
-  best_lambda <- cv_results$lambda[which.min(cv_results$MAE)]
-  cv_plot <- ggplot(cv_results, aes(x = lambda, y = MAE)) +
+  best_lambda <- cv_results$lambda[which.min(cv_results$MSE)]
+  cv_plot <- ggplot(cv_results, aes(x = lambda, y = MSE)) +
     geom_line(size = 1, color = "steelblue") +
     geom_point(size = 2, color = "darkred") +
     geom_vline(xintercept = best_lambda, linetype = "dashed", color = "darkgreen", size = 1) +
     theme_minimal(base_size = 14) +
     labs(
-      title = paste0("Cross-Validation MAE vs Lambda (a0=", a0, ", a1=", a1, ")"),
+      title = paste0("Cross-Validation MSE vs Lambda (a0=", a0, ", a1=", a1, ")"),
       subtitle = paste0("Best lambda = ", best_lambda),
       x = expression(lambda),
-      y = "Mean Absolute Error (MAE)"
+      y = "Mean Squared Error (MSE)"
     )
   
   print(cv_plot)
   
   ggsave(
-    filename = paste0("lambda_CV_a0_", a0*100, "_a1_", a1*100, ".png"),
+    filename = paste0("lambda_CV_a0_", a0*100, "_a1_", a1*100, "_baseline_model.png"),
     plot = cv_plot,
     width = 8,
     height = 4,
@@ -432,7 +432,7 @@ cv_lambda <- function(df, metric_names, lambda_values, a0, a1) {
   
   print(weight_plot)
   ggsave(
-    filename = paste0("weights_CV_a0_", a0*100, "_a1_", a1*100, ".png"),
+    filename = paste0("weights_CV_a0_", a0*100, "_a1_", a1*100, "_baseline_model.png"),
     plot = weight_plot,
     width = 8,
     height = 4,
@@ -516,7 +516,7 @@ cv_result_85_15 <- cv_lambda(
 )
 
 lambda_85_15 <- cv_result_85_15$best_lambda
-
+lambda_85_15
 lambda_85_15 = 0.1
 
 a0_85_a1_15_result <- optimize_funding(
@@ -542,12 +542,6 @@ a0_85_a1_15_analysis <- analyze_funding_results(a0_85_a1_15_result$result_df,
 
 # a0=0.75, a1=0.25
 
-optimize_lambda(df, metric_names, a0=0.75, a1=0.25)
-
-lambda_75_25=0.15
-
-
-
 cv_result_75_25 <- cv_lambda(
   df = df,
   metric_names = metric_names,
@@ -555,6 +549,7 @@ cv_result_75_25 <- cv_lambda(
   a0 = 0.75,
   a1 = 0.25
 )
+
 lambda_75_25 <- cv_result_75_25$best_lambda
 
 lambda_75_25
@@ -579,8 +574,6 @@ a0_75_a1_25_analysis <- analyze_funding_results(a0_75_a1_25_result$result_df,
 
 
 # a0=0.5, a1=0.5
-lambda_values <- seq(0, 1, by = 0.05)
-
 
 cv_result_5_5 <- cv_lambda(
   df = df,
@@ -590,8 +583,8 @@ cv_result_5_5 <- cv_lambda(
   a1 = 0.5
 )
 lambda_5_5 <- cv_result_5_5$best_lambda
-
-lambda_5_5 = 0.4
+lambda_5_5
+lambda_5_5 = 0.1
 
 a0_5_a1_5_result <- optimize_funding(
   df,
